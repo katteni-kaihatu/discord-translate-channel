@@ -28,6 +28,30 @@ uv run main.py
 
 止めるときは `Ctrl+C`。
 
+## Docker Compose で運用する
+
+GitHub Actions は `main` と pull request でコンテナをビルドし、`v*` タグを push すると GHCR に同名タグのイメージを公開します。現在の Compose は `v0.0.1` を使用します。
+
+ホストに `compose.yml` と `.env.example` を配置し、次のように準備します。
+
+```bash
+cp .env.example .env
+mkdir -p data
+printf '[]\n' > data/pairs.json
+chmod 600 .env
+docker compose config --quiet
+```
+
+`.env` の `DISCORD_BOT_TOKEN`、`LLM_API_KEY`、`LLM_MODEL` を実際の値に変えてから起動します。
+
+```bash
+docker compose pull
+docker compose up -d
+docker compose logs -f discord-translate
+```
+
+生成・更新される JSON はホストの `data/pairs.json` に保存します。以前の環境から移行する場合は、**起動前**に既存の `pairs.json` を `data/pairs.json` へコピーするか、内容を貼り付けてください。既存ファイルがあれば `printf` の行は実行しません。Bot は保存時に同じディレクトリへ一時ファイルを作って置き換えるため、`data` はホスト上で実行ユーザー（UID 1000）が書き込めるようにします。
+
 ## 翻訳チャンネルを作る
 
 日本語・英語・韓国語のチャンネルを1組（クラスタ）にして、どのチャンネルの発言も、ほかの全チャンネルへそれぞれの言語に翻訳して投稿する。翻訳は発言の言語から各言語へ LLM が直接行う。

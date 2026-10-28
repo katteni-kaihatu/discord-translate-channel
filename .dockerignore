@@ -1,0 +1,8 @@
+.git
+.github
+.venv
+.env
+__pycache__
+pairs.json
+pairs.json.tmp
+*.pyc

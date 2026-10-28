@@ -1,0 +1,13 @@
+services:
+  discord-translate:
+    image: ghcr.io/katteni-kaihatu/discord-translate-channel:v0.0.1
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      PAIRS_PATH: /data/pairs.json
+    volumes:
+      - type: bind
+        source: ./data
+        target: /data
+        bind:
+          create_host_path: false
