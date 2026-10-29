@@ -1,6 +1,6 @@
 services:
   discord-translate:
-    image: ghcr.io/katteni-kaihatu/discord-translate-channel:v0.0.1
+    image: ghcr.io/katteni-kaihatu/discord-translate-channel:v0.0.2
     restart: unless-stopped
     env_file: .env
     environment:

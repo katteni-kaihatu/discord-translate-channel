@@ -31,7 +31,7 @@ uv run main.py
 
 ## Docker Compose で運用する
 
-GitHub Actions は `main` と pull request でコンテナをビルドし、`v*` タグを push すると GHCR に同名タグのイメージを公開します。現在の Compose は `v0.0.1` を使用します。
+GitHub Actions は `main` と pull request でコンテナをビルドし、`v*` タグを push すると GHCR に同名タグのイメージを公開します。現在の Compose は `v0.0.2` を使用します。
 
 ホストに `compose.yml` と `.env.example` を配置し、次のように準備します。
 
@@ -51,7 +51,7 @@ docker compose up -d
 docker compose logs -f discord-translate
 ```
 
-生成・更新される JSON はホストの `data/pairs.json` に保存します。以前の環境から移行する場合は、**起動前**に既存の `pairs.json` を `data/pairs.json` へコピーするか、内容を貼り付けてください。既存ファイルがあれば `printf` の行は実行しません。Bot は保存時に同じディレクトリへ一時ファイルを作って置き換えるため、`data` はホスト上で実行ユーザー（UID 1000）が書き込めるようにします。
+生成・更新される JSON はホストの `data/pairs.json` と `data/bots.json` に保存します。以前の環境から移行する場合は、**起動前**に既存の `pairs.json` を `data/pairs.json` へコピーするか、内容を貼り付けてください。既存ファイルがあれば `printf` の行は実行しません。`bots.json` は `/tr-bot add` の初回実行時に作られます。Bot は保存時に同じディレクトリへ一時ファイルを作って置き換えるため、`data` はホスト上で実行ユーザー（UID 1000）が書き込めるようにします。
 
 ## 翻訳チャンネルを作る
 
