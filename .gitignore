@@ -4,4 +4,6 @@ __pycache__/
 .claude/
 pairs.json
 pairs.json.tmp
+bots.json
+bots.json.tmp
 data/

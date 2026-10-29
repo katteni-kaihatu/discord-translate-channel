@@ -22,6 +22,12 @@ LANGS = ("ja", "en", "ko")
 JSON_KEYS = {"ja": "JP", "en": "EN", "ko": "KO"}
 SUFFIXES = {"ja": "-jp", "en": "-en", "ko": "-ko"}
 REPLY_LABEL = {"ja": "返信", "en": "Reply", "ko": "답장"}
+TRANSLATED_TYPES = (
+    discord.MessageType.default,
+    discord.MessageType.reply,
+    discord.MessageType.chat_input_command,
+    discord.MessageType.context_menu_command,
+)
 NO_MENTIONS = discord.AllowedMentions.none()
 
 log = logging.getLogger("translate-bot")
@@ -70,6 +76,26 @@ class ClusterStore:
         os.replace(tmp, self.path)
 
 
+class BotStore:
+    def __init__(self, path: Path) -> None:
+        self.path = path
+        raw = json.loads(path.read_text(encoding="utf-8")) if path.exists() else []
+        self.ids: set[int] = {int(bot_id) for bot_id in raw}
+
+    def add(self, bot_id: int) -> None:
+        self.ids.add(bot_id)
+        self.save()
+
+    def remove(self, bot_id: int) -> None:
+        self.ids.discard(bot_id)
+        self.save()
+
+    def save(self) -> None:
+        tmp = self.path.with_name(self.path.name + ".tmp")
+        tmp.write_text(json.dumps([str(bot_id) for bot_id in sorted(self.ids)], indent=2), encoding="utf-8")
+        os.replace(tmp, self.path)
+
+
 def split_message(text: str, limit: int = MAX_LENGTH) -> list[str]:
     chunks = []
     while len(text) > limit:
@@ -100,12 +126,13 @@ def webhook_username(member: discord.abc.User) -> str:
 
 
 class TranslateBot(discord.Client):
-    def __init__(self, store: ClusterStore, translator: Translator) -> None:
+    def __init__(self, store: ClusterStore, bots: BotStore, translator: Translator) -> None:
         intents = discord.Intents.default()
         intents.message_content = True
         super().__init__(intents=intents, allowed_mentions=NO_MENTIONS)
         self.tree = app_commands.CommandTree(self)
         self.store = store
+        self.bots = bots
         self.translator = translator
         self.cluster_of: dict[int, Cluster] = {}
         self.lang_of: dict[int, str] = {}
@@ -134,6 +161,29 @@ class TranslateBot(discord.Client):
         @app_commands.default_permissions(manage_channels=True)
         async def create_tr_channel(interaction: discord.Interaction) -> None:
             await self.create_tr_channel(interaction)
+
+        bot_group = app_commands.Group(
+            name="tr-bot",
+            description="翻訳する Bot の設定",
+            guild_only=True,
+            default_permissions=discord.Permissions(manage_channels=True),
+        )
+
+        @bot_group.command(name="add", description="指定した Bot の発言も翻訳するようにします")
+        @app_commands.describe(bot="翻訳する Bot")
+        async def tr_bot_add(interaction: discord.Interaction, bot: discord.User) -> None:
+            await self.add_translated_bot(interaction, bot)
+
+        @bot_group.command(name="remove", description="指定した Bot の発言を翻訳しないようにします")
+        @app_commands.describe(bot="翻訳をやめる Bot")
+        async def tr_bot_remove(interaction: discord.Interaction, bot: discord.User) -> None:
+            await self.remove_translated_bot(interaction, bot)
+
+        @bot_group.command(name="list", description="発言を翻訳する Bot の一覧を表示します")
+        async def tr_bot_list(interaction: discord.Interaction) -> None:
+            await self.list_translated_bots(interaction)
+
+        self.tree.add_command(bot_group)
 
     async def on_ready(self) -> None:
         if self.initialized:
@@ -260,6 +310,33 @@ class TranslateBot(discord.Client):
             f"{en.mention} と {ko.mention} を作成し、{channel.mention} と紐付けました。"
         )
 
+    async def add_translated_bot(self, interaction: discord.Interaction, bot: discord.User) -> None:
+        if bot.id == self.user.id:
+            message = "この Bot 自身は指定できません（翻訳結果を翻訳し続けてしまうため）。"
+        elif not bot.bot:
+            message = f"{bot.mention} は Bot ではありません。ユーザーの発言は常に翻訳されます。"
+        elif bot.id in self.bots.ids:
+            message = f"{bot.mention} はすでに翻訳対象です。"
+        else:
+            self.bots.add(bot.id)
+            message = f"{bot.mention} の発言を翻訳するようにしました。"
+        await interaction.response.send_message(message, ephemeral=True, allowed_mentions=NO_MENTIONS)
+
+    async def remove_translated_bot(self, interaction: discord.Interaction, bot: discord.User) -> None:
+        if bot.id in self.bots.ids:
+            self.bots.remove(bot.id)
+            message = f"{bot.mention} の発言を翻訳しないようにしました。"
+        else:
+            message = f"{bot.mention} は翻訳対象ではありません。"
+        await interaction.response.send_message(message, ephemeral=True, allowed_mentions=NO_MENTIONS)
+
+    async def list_translated_bots(self, interaction: discord.Interaction) -> None:
+        if self.bots.ids:
+            message = "発言を翻訳する Bot:\n" + "\n".join(f"- <@{bot_id}>" for bot_id in sorted(self.bots.ids))
+        else:
+            message = "発言を翻訳する Bot はありません。"
+        await interaction.response.send_message(message, ephemeral=True, allowed_mentions=NO_MENTIONS)
+
     async def on_guild_channel_delete(self, channel: discord.abc.GuildChannel) -> None:
         if channel.id not in self.lang_of:
             return
@@ -283,10 +360,17 @@ class TranslateBot(discord.Client):
         return (
             message.channel.id in self.lang_of
             and message.channel.id in self.webhooks
-            and not message.author.bot
-            and message.webhook_id is None
-            and message.type in (discord.MessageType.default, discord.MessageType.reply)
+            and message.type in TRANSLATED_TYPES
+            and (self.is_human(message) or self.is_translated_bot(message))
         )
+
+    def is_human(self, message: discord.Message) -> bool:
+        return not message.author.bot and message.webhook_id is None
+
+    def is_translated_bot(self, message: discord.Message) -> bool:
+        # Webhook posts use the webhook's ID as the author, so the bot's own translations never match.
+        # Slash command responses carry a webhook_id but are authored by the bot user itself.
+        return message.author.id in self.bots.ids and message.author.id != self.user.id
 
     def counterpart(self, message_id: int, channel_id: int) -> int | None:
         source_id = message_id if message_id in self.mirrors else self.origins.get(message_id)
@@ -456,7 +540,9 @@ def main() -> None:
         sys.exit(f"missing settings in .env: {', '.join(missing)}")
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
-    store = ClusterStore(Path(os.getenv("PAIRS_PATH", "pairs.json")))
+    pairs_path = Path(os.getenv("PAIRS_PATH", "pairs.json"))
+    store = ClusterStore(pairs_path)
+    bots = BotStore(Path(os.getenv("BOTS_PATH", pairs_path.with_name("bots.json"))))
     ja_id, en_id = os.getenv("JA_CHANNEL_ID"), os.getenv("EN_CHANNEL_ID")
     if ja_id and en_id and not store.contains(int(ja_id)):
         store.add({"ja": int(ja_id), "en": int(en_id)})
@@ -468,7 +554,7 @@ def main() -> None:
         timeout=float(os.getenv("LLM_TIMEOUT_SECONDS", "30")),
         max_retries=int(os.getenv("LLM_MAX_RETRIES", "2")),
     )
-    bot = TranslateBot(store, translator)
+    bot = TranslateBot(store, bots, translator)
     bot.run(os.environ["DISCORD_BOT_TOKEN"], log_handler=None)
 
 

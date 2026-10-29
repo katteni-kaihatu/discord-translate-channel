@@ -17,6 +17,7 @@
 | `LLM_TIMEOUT_SECONDS` | | `30` |
 | `LLM_MAX_RETRIES` | | `2` |
 | `PAIRS_PATH` | | `pairs.json` |
+| `BOTS_PATH` | | `PAIRS_PATH` と同じディレクトリの `bots.json` |
 | `JA_CHANNEL_ID` / `EN_CHANNEL_ID` | | 両方あれば起動時にそのペアを `pairs.json` に追加する |
 
 ## 起動と停止
@@ -64,6 +65,17 @@ docker compose logs -f discord-translate
 - クラスタは `pairs.json` に `[{"JP": "<ID>", "EN": "<ID>", "KO": "<ID>"}, ...]` の形で保存される。
 - 起動時に日本語と英語だけのクラスタがあれば、韓国語のチャンネルを作って英語のチャンネルのすぐ下に置く。
 - クラスタのチャンネルを削除すると、そのチャンネルは `pairs.json` から外れる。韓国語のチャンネルを消した場合は、次の起動時に作り直される。
+
+## Bot の発言を翻訳する
+
+Bot の発言は通常翻訳しないが、`/tr-bot` で指定した Bot の発言は翻訳する（「チャンネルの管理」の権限が必要）。
+
+- `/tr-bot add bot:<Bot>`：その Bot の発言を翻訳するようにする。スラッシュコマンドへの応答も翻訳する。
+- `/tr-bot remove bot:<Bot>`：その Bot の発言を翻訳しないようにする。
+- `/tr-bot list`：翻訳する Bot の一覧を表示する。
+- この Bot 自身は、訳文を翻訳し続けてしまうため指定できない。ほかの翻訳 Bot を指定すると互いに翻訳し合うおそれがあるので注意する。
+- 翻訳するのは本文と添付ファイルの URL だけで、埋め込み（embed）は翻訳しない。Webhook からの投稿は翻訳しない。
+- 指定した Bot は `bots.json` に `["<ID>", ...]` の形で保存される。
 
 ## 動き
 
