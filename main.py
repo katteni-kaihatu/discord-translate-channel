@@ -122,7 +122,16 @@ STICKER_EXTENSIONS = {1: "png", 2: "png", 4: "gif"}  # 3 は Lottie（JSON）で
 
 
 def sticker_image_url(sticker: discord.Sticker) -> str:
-    """スタンプの画像 URL。Lottie はラスタ画像が CDN に無いので、メディアプロキシの PNG プレビューで代替する（ベストエフォート）。"""
+    """スタンプの画像 URL。基本的には discord.py が用意する sticker.url（Discord の CDN）を使う。
+
+    Lottie だけは sticker.url がアニメーションの JSON を指して画像にならないため、
+    メディアプロキシの PNG プレビューで代替する（ベストエフォート）。
+    """
+    if int(sticker.format) == 3:
+        return f"https://media.discordapp.net/stickers/{sticker.id}.png"
+    url = getattr(sticker, "url", None)
+    if url:
+        return url
     extension = STICKER_EXTENSIONS.get(int(sticker.format))
     if extension:
         return f"https://cdn.discordapp.com/stickers/{sticker.id}.{extension}"
