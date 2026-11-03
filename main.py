@@ -117,6 +117,85 @@ def slugify(name: str, suffix: str) -> str:
     return slug[:MAX_CHANNEL_BASE].strip("-") or "translated"
 
 
+CUSTOM_EMOJI_TOKEN = re.compile(r"<(a?):([A-Za-z0-9_]{2,32}):(\d{17,20})>")
+STICKER_EXTENSIONS = {1: "png", 2: "png", 4: "gif"}  # 3 は Lottie（JSON）で画像としては扱えない
+
+
+def sticker_image_url(sticker: discord.Sticker | discord.StickerItem) -> str:
+    """スタンプの画像 URL。基本的には discord.py が用意する sticker.url（Discord の CDN）を使う。
+
+    Lottie だけは sticker.url がアニメーションの JSON を指して画像にならないため、
+    メディアプロキシの PNG プレビューで代替する（ベストエフォート）。
+    """
+    format_type = sticker.format.value
+    if format_type == 3:
+        return f"https://media.discordapp.net/stickers/{sticker.id}.png"
+    url = getattr(sticker, "url", None)
+    if url:
+        return url
+    extension = STICKER_EXTENSIONS.get(format_type)
+    if extension:
+        return f"https://cdn.discordapp.com/stickers/{sticker.id}.{extension}"
+    return f"https://media.discordapp.net/stickers/{sticker.id}.png"
+
+
+def is_emoji_only_text(text: str) -> bool:
+    """カスタム絵文字コードを取り除いた残りが、Unicode 絵文字と空白だけかどうか。
+
+    判定は文字種の範囲で見る実用的なもの（国旗・肌色・合体絵文字の構成文字を含む）。
+    「草」のような文字は絵文字ではないので、残りに含まれていれば対象外になる。
+    """
+    if not text.strip():
+        return False
+    for char in text:
+        code = ord(char)
+        if char.isspace() or char in "️‍⃣" or 0x1F000 <= code <= 0x1FAFF or 0x2300 <= code <= 0x23FF \
+                or 0x2600 <= code <= 0x27BF or 0x2B00 <= code <= 0x2BFF or code in (0xA9, 0xAE, 0x203C, 0x2049, 0x3030, 0x303D, 0x3297, 0x3299):
+            continue
+        if char in "#*0123456789" and "⃣" in text:
+            continue  # キーキャップ絵文字の数字・記号部分
+        return False
+    return True
+
+
+def emoji_only_part(message: discord.Message) -> str | None:
+    """発言が絵文字だけ（カスタム絵文字・Unicode 絵文字、複数可）のとき、翻訳せずに送る内容を返す。対象外なら None。
+
+    外部サーバーのカスタム絵文字が 1 つでも混ざっていたら、カスタム絵文字はすべて
+    画像 URL の列に置き換える（このサーバーの絵文字はコードのままでも表示できるが、
+    混ざった状態では並びを保つため画像に揃える）。Unicode 絵文字の並びはそのまま残す。
+    外部が無ければ原文のまま送る。
+    """
+    content = message.content.strip()
+    if not content:
+        return None
+    guild_ids = {emoji.id for emoji in message.guild.emojis} if message.guild is not None else set()
+    lines: list[str] = []
+    has_external = False
+    position = 0
+    for match in CUSTOM_EMOJI_TOKEN.finditer(content):
+        between = content[position:match.start()]
+        if between.strip():
+            if not is_emoji_only_text(between):
+                return None
+            lines.append(between.strip())
+        animated, _, emoji_id = match.groups()
+        if int(emoji_id) not in guild_ids:
+            has_external = True
+        lines.append(f"https://cdn.discordapp.com/emojis/{emoji_id}.{'gif' if animated else 'png'}")
+        position = match.end()
+    tail = content[position:]
+    if tail.strip():
+        if not is_emoji_only_text(tail):
+            return None
+        lines.append(tail.strip())
+    if not lines:
+        return content if is_emoji_only_text(content) else None
+    if not has_external:
+        return content
+    return "\n".join(lines)
+
+
 def webhook_username(member: discord.abc.User) -> str:
     name = member.display_name.strip()[:80]
     lowered = name.lower()
@@ -529,8 +608,11 @@ class TranslateBot(discord.Client):
     async def build_chunks(self, message: discord.Message, target_channel_id: int, lang: str) -> list[str]:
         parts = []
         if message.content.strip():
-            parts.append(await self.translator.translate(message.content, lang))
+            emoji_only = emoji_only_part(message)
+            parts.append(emoji_only if emoji_only is not None else await self.translator.translate(message.content, lang))
         parts.extend(attachment.url for attachment in message.attachments)
+        # スタンプは本文にも添付にも入らないので、そのままでは訳文に残らない。添付と同じく画像の URL で送る
+        parts.extend(sticker_image_url(sticker) for sticker in message.stickers)
         if not parts:
             return []
         return split_message(self.reply_link(message, target_channel_id, lang) + "\n".join(parts))
