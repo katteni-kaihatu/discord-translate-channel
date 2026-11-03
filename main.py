@@ -117,6 +117,34 @@ def slugify(name: str, suffix: str) -> str:
     return slug[:MAX_CHANNEL_BASE].strip("-") or "translated"
 
 
+CUSTOM_EMOJI_PATTERN = re.compile(r"^<(a?):([A-Za-z0-9_]{2,32}):(\d{17,20})>$")
+STICKER_EXTENSIONS = {1: "png", 2: "png", 4: "gif"}  # 3 は Lottie（JSON）で画像としては扱えない
+
+
+def sticker_image_url(sticker: discord.Sticker) -> str:
+    """スタンプの画像 URL。Lottie はラスタ画像が CDN に無いので、メディアプロキシの PNG プレビューで代替する（ベストエフォート）。"""
+    extension = STICKER_EXTENSIONS.get(int(sticker.format))
+    if extension:
+        return f"https://cdn.discordapp.com/stickers/{sticker.id}.{extension}"
+    return f"https://media.discordapp.net/stickers/{sticker.id}.png"
+
+
+def single_custom_emoji_part(message: discord.Message) -> str | None:
+    """発言がカスタム絵文字 1 つだけのとき、翻訳せずに送る内容を返す。対象外なら None。
+
+    このサーバーの絵文字はコードのまま Webhook で表示できるが、外部サーバーの絵文字は
+    コードを送っても表示できないため、絵文字自体の画像 URL に置き換える。
+    """
+    match = CUSTOM_EMOJI_PATTERN.match(message.content.strip())
+    if match is None:
+        return None
+    animated, _, emoji_id = match.groups()
+    guild = message.guild
+    if guild is not None and any(emoji.id == int(emoji_id) for emoji in guild.emojis):
+        return message.content.strip()
+    return f"https://cdn.discordapp.com/emojis/{emoji_id}.{'gif' if animated else 'png'}"
+
+
 def webhook_username(member: discord.abc.User) -> str:
     name = member.display_name.strip()[:80]
     lowered = name.lower()
@@ -394,8 +422,11 @@ class TranslateBot(discord.Client):
     async def build_chunks(self, message: discord.Message, target_channel_id: int, lang: str) -> list[str]:
         parts = []
         if message.content.strip():
-            parts.append(await self.translator.translate(message.content, lang))
+            single = single_custom_emoji_part(message)
+            parts.append(single if single is not None else await self.translator.translate(message.content, lang))
         parts.extend(attachment.url for attachment in message.attachments)
+        # スタンプは本文にも添付にも入らないので、そのままでは訳文に残らない。添付と同じく画像の URL で送る
+        parts.extend(sticker_image_url(sticker) for sticker in message.stickers)
         if not parts:
             return []
         return split_message(self.reply_link(message, target_channel_id, lang) + "\n".join(parts))
