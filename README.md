@@ -31,7 +31,7 @@ uv run main.py
 
 ## Docker Compose で運用する
 
-GitHub Actions は `main` と pull request でコンテナをビルドし、`v*` タグを push すると GHCR に同名タグのイメージを公開します。現在の Compose は `v0.0.2` を使用します。
+GitHub Actions は `main` と pull request でコンテナをビルドし、`v*` タグを push すると GHCR に同名タグのイメージを公開します。コンテナのビルド中に回帰テストも実行します。現在の Compose は `v0.0.3` を使用します。
 
 ホストに `compose.yml` と `.env.example` を配置し、次のように準備します。
 
