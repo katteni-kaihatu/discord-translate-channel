@@ -121,18 +121,19 @@ CUSTOM_EMOJI_TOKEN = re.compile(r"<(a?):([A-Za-z0-9_]{2,32}):(\d{17,20})>")
 STICKER_EXTENSIONS = {1: "png", 2: "png", 4: "gif"}  # 3 は Lottie（JSON）で画像としては扱えない
 
 
-def sticker_image_url(sticker: discord.Sticker) -> str:
+def sticker_image_url(sticker: discord.Sticker | discord.StickerItem) -> str:
     """スタンプの画像 URL。基本的には discord.py が用意する sticker.url（Discord の CDN）を使う。
 
     Lottie だけは sticker.url がアニメーションの JSON を指して画像にならないため、
     メディアプロキシの PNG プレビューで代替する（ベストエフォート）。
     """
-    if int(sticker.format) == 3:
+    format_type = sticker.format.value
+    if format_type == 3:
         return f"https://media.discordapp.net/stickers/{sticker.id}.png"
     url = getattr(sticker, "url", None)
     if url:
         return url
-    extension = STICKER_EXTENSIONS.get(int(sticker.format))
+    extension = STICKER_EXTENSIONS.get(format_type)
     if extension:
         return f"https://cdn.discordapp.com/stickers/{sticker.id}.{extension}"
     return f"https://media.discordapp.net/stickers/{sticker.id}.png"
