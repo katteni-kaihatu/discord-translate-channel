@@ -11,6 +11,8 @@ COPY pyproject.toml uv.lock ./
 RUN uv sync --locked --no-install-project
 
 COPY main.py translate.py ./
+RUN --mount=type=bind,source=tests,target=/app/tests,readonly \
+    .venv/bin/python -m unittest discover -s tests -v
 RUN mkdir /data && chown 1000:1000 /data
 
 LABEL org.opencontainers.image.source="https://github.com/katteni-kaihatu/discord-translate-channel"

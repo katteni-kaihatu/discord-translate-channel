@@ -140,6 +140,8 @@ class TranslateBot(discord.Client):
         self.locks: dict[int, asyncio.Lock] = {}
         self.mirrors: OrderedDict[int, Mirror] = OrderedDict()
         self.origins: dict[int, int] = {}
+        # Bot が転送で付けたリアクションの記録: 対象メッセージ ID -> {絵文字キー: (名前, ID, アニメーション)}
+        self.reaction_mirrors: dict[int, dict[str, tuple[str, int | None, bool]]] = {}
         self.initialized = False
         self.reindex()
 
@@ -382,6 +384,139 @@ class TranslateBot(discord.Client):
         ids = mirror.targets.get(channel_id)
         return ids[0] if ids else None
 
+    def mirror_group(self, message_id: int) -> list[tuple[int, int]]:
+        """原文と各チャンネルの訳文先頭の (チャンネル ID, メッセージ ID) 一覧。対応が無ければ空。"""
+        source_id = message_id if message_id in self.mirrors else self.origins.get(message_id)
+        mirror = self.mirrors.get(source_id) if source_id is not None else None
+        if mirror is None:
+            return []
+        group = [(mirror.source_channel_id, source_id)]
+        for channel_id, ids in mirror.targets.items():
+            if ids:
+                group.append((channel_id, ids[0]))
+        return group
+
+    @staticmethod
+    def emoji_key(emoji: object) -> str:
+        emoji_id = getattr(emoji, "id", None)
+        return f"custom:{emoji_id}" if emoji_id else f"unicode:{getattr(emoji, 'name', emoji)}"
+
+    @staticmethod
+    def same_emoji(a: object, b: object) -> bool:
+        a_id, b_id = getattr(a, "id", None), getattr(b, "id", None)
+        if a_id or b_id:
+            return a_id == b_id
+        return str(getattr(a, "name", a)) == str(getattr(b, "name", b))
+
+    @staticmethod
+    def reaction_is_transferable(emoji: discord.PartialEmoji, guild: discord.Guild | None) -> bool:
+        # Unicode 絵文字はどこでも使える。カスタム絵文字は Bot が所属するサーバーのものだけ使えるため、
+        # 外部サーバーの絵文字は移せない（この Bot は 1 サーバー前提なので、対象はこのサーバーの絵文字だけになる）
+        if emoji.id is None:
+            return True
+        return guild is not None and any(entry.id == emoji.id for entry in guild.emojis)
+
+    async def fetch_mirrored_message(self, channel_id: int, message_id: int) -> discord.Message | None:
+        channel = await self.resolve_channel(channel_id)
+        if channel is None:
+            return None
+        try:
+            return await channel.fetch_message(message_id)
+        except discord.HTTPException:
+            return None
+
+    async def apply_reaction(self, target: discord.Message, emoji: discord.PartialEmoji, add: bool) -> None:
+        key = self.emoji_key(emoji)
+        try:
+            if add:
+                await target.add_reaction(emoji)
+                self.reaction_mirrors.setdefault(target.id, {})[key] = (emoji.name, emoji.id, emoji.animated)
+            else:
+                await target.remove_reaction(emoji, self.user)
+                self.forget_reaction(target.id, key)
+        except discord.HTTPException:
+            log.exception("failed to %s reaction on message %s", "add" if add else "remove", target.id)
+
+    def forget_reaction(self, message_id: int, key: str) -> None:
+        recorded = self.reaction_mirrors.get(message_id)
+        if recorded is not None:
+            recorded.pop(key, None)
+            if not recorded:
+                self.reaction_mirrors.pop(message_id, None)
+
+    async def sync_reactions(
+        self, channel_id: int, message_id: int, guild: discord.Guild | None,
+        emoji: discord.PartialEmoji | None = None,
+    ) -> None:
+        if channel_id not in self.lang_of:
+            return
+        group = self.mirror_group(message_id)
+        if (channel_id, message_id) not in group:
+            return  # 分割された訳文は先頭チャンクのみ対象
+        # 同じ原文に属するイベントと編集を直列化し、古い追加処理が取り消しを上書きしないようにする。
+        async with self.locks[group[0][0]]:
+            group = self.mirror_group(message_id)
+            if (channel_id, message_id) not in group:
+                return
+            messages = []
+            for cid, mid in group:
+                message = await self.fetch_mirrored_message(cid, mid)
+                if message is None:
+                    return  # 取得失敗を「誰も付けていない」と扱わない
+                messages.append(message)
+            emojis = {}
+            if emoji is not None:
+                emojis[self.emoji_key(emoji)] = emoji
+            else:
+                # 全消しの際も、他のチャンネルに残るリアクションは維持する。
+                for message in messages:
+                    for name, eid, animated in self.reaction_mirrors.get(message.id, {}).values():
+                        item = discord.PartialEmoji(name=name, id=eid, animated=animated)
+                        emojis[self.emoji_key(item)] = item
+                    for reaction in message.reactions:
+                        item = reaction.emoji
+                        if isinstance(item, str):
+                            item = discord.PartialEmoji(name=item)
+                        emojis[self.emoji_key(item)] = item
+            for key, item in emojis.items():
+                if not self.reaction_is_transferable(item, guild):
+                    continue
+                reactions = [
+                    next((r for r in m.reactions if self.same_emoji(r.emoji, item)), None)
+                    for m in messages
+                ]
+                counts = [max(r.count - int(r.me), 0) if r else 0 for r in reactions]
+                total = sum(counts)
+                for message, reaction, count in zip(messages, reactions, counts):
+                    has_own = reaction is not None and reaction.me
+                    tracked = key in self.reaction_mirrors.get(message.id, {})
+                    if not has_own:
+                        self.forget_reaction(message.id, key)
+                    if total > count and not has_own:
+                        await self.apply_reaction(message, item, True)
+                    elif total == count and has_own and tracked:
+                        # 翻訳失敗の警告など、転送以外の目的で付けた Bot の絵文字は削除しない。
+                        await self.apply_reaction(message, item, False)
+
+    async def on_raw_reaction_add(self, payload: discord.RawReactionActionEvent) -> None:
+        if self.user is None or payload.user_id == self.user.id:
+            return
+        guild = self.get_guild(payload.guild_id) if payload.guild_id else None
+        if self.reaction_is_transferable(payload.emoji, guild):
+            await self.sync_reactions(payload.channel_id, payload.message_id, guild, payload.emoji)
+
+    async def on_raw_reaction_remove(self, payload: discord.RawReactionActionEvent) -> None:
+        await self.on_raw_reaction_add(payload)
+
+    async def on_raw_reaction_clear(self, payload: discord.RawReactionClearEvent) -> None:
+        guild = self.get_guild(payload.guild_id) if payload.guild_id else None
+        await self.sync_reactions(payload.channel_id, payload.message_id, guild)
+
+    async def on_raw_reaction_clear_emoji(self, payload: discord.RawReactionClearEmojiEvent) -> None:
+        guild = self.get_guild(payload.guild_id) if payload.guild_id else None
+        if self.reaction_is_transferable(payload.emoji, guild):
+            await self.sync_reactions(payload.channel_id, payload.message_id, guild, payload.emoji)
+
     def reply_link(self, message: discord.Message, target_channel_id: int, lang: str) -> str:
         if message.reference is None or message.reference.message_id is None:
             return ""
@@ -451,17 +586,21 @@ class TranslateBot(discord.Client):
             for target_id in ids:
                 self.origins[target_id] = source_id
         while len(self.mirrors) > MAX_TRACKED:
-            _, old = self.mirrors.popitem(last=False)
+            old_id, old = self.mirrors.popitem(last=False)
+            self.reaction_mirrors.pop(old_id, None)
             for ids in old.targets.values():
                 for target_id in ids:
                     self.origins.pop(target_id, None)
+                    self.reaction_mirrors.pop(target_id, None)
 
     def forget(self, source_id: int) -> Mirror | None:
         mirror = self.mirrors.pop(source_id, None)
         if mirror:
+            self.reaction_mirrors.pop(source_id, None)
             for ids in mirror.targets.values():
                 for target_id in ids:
                     self.origins.pop(target_id, None)
+                    self.reaction_mirrors.pop(target_id, None)
         return mirror
 
     async def mark_failed(self, message: discord.Message) -> None:
@@ -504,9 +643,14 @@ class TranslateBot(discord.Client):
                 *(self.resync(message, cid, self.lang_of[cid], ids) for cid, ids in targets)
             )
             updated = {cid: ids for (cid, _), ids in zip(targets, results) if ids}
+            retained_ids = {payload.message_id, *(mid for ids in updated.values() for mid in ids)}
+            retained_reactions = {
+                mid: self.reaction_mirrors[mid] for mid in retained_ids if mid in self.reaction_mirrors
+            }
             self.forget(payload.message_id)
             if updated:
                 self.remember(payload.message_id, Mirror(payload.channel_id, message.content, updated))
+                self.reaction_mirrors.update(retained_reactions)
 
     async def on_raw_message_delete(self, payload: discord.RawMessageDeleteEvent) -> None:
         await self.delete_mirror(payload.message_id)
